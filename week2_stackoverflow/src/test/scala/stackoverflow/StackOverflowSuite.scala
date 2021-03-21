@@ -49,6 +49,7 @@ class StackOverflowSuite {
       Posting(2, 1001, None, Some(1000), 5, Some("Java")),
       Posting(2, 1002, None, Some(1000), 11, Some("Java")),
       Posting(2, 1003, None, Some(1000), 12, Some("Java")),
+      Posting(1, 2000, None, None, 0, Some("Groovy")),
     )
     val postingsRdd = sc.parallelize(data)
     val so = new StackOverflow
