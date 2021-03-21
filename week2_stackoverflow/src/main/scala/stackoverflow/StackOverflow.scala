@@ -27,7 +27,7 @@ object StackOverflow extends StackOverflow {
     val grouped = groupedPostings(raw)
     val scored = scoredPostings(grouped)
     val vectors = vectorPostings(scored)
-    //    assert(vectors.count() == 2121822, "Incorrect number of vectors: " + vectors.count())
+    assert(vectors.count() == 2121822, "Incorrect number of vectors: " + vectors.count())
 
     val means = kmeans(sampleVectors(vectors), vectors, debug = true)
     val results = clusterResults(means, vectors)
@@ -89,7 +89,9 @@ class StackOverflow extends StackOverflowInterface with Serializable {
   }
 
 
-  /** PART 2: Compute the maximum score for each posting */
+  /** PART 2: Compute the maximum score for each posting - that is, for each question, among all the answers given,
+    * what was the highest score held by any one answer? (scores are based on user votes)
+    * */
   def scoredPostings(grouped: RDD[(QID, Iterable[(Question, Answer)])]): RDD[(Question, HighScore)] = {
 
     def answerHighScore(as: Array[Answer]): HighScore = {
@@ -106,9 +108,10 @@ class StackOverflow extends StackOverflowInterface with Serializable {
 
     /** We want the form of (1, 6,   None, None, 140, Some(CSS)),  67) per element of our RDD.
       * The first tuple item is the question, the second is the high score.
-      * Question is obtained from the iterable's first tuple, first element.
-      * Answer is obtained from scanning all the answers within the iterable.
-      * Casting to an array is required to use the provided answerHighScore method. */
+      * Question is obtained from the first element of the iterable's first tuple.
+      * High score is obtained from scanning all the answers within the iterable.
+      * Casting to an array is required to use the provided answerHighScore method.
+      * */
     grouped.map(v => (
       v._2.head._1, // the question
       answerHighScore(v._2.map(_._2).toArray) // the highest scored answer to the question
@@ -116,10 +119,16 @@ class StackOverflow extends StackOverflowInterface with Serializable {
   }
 
 
-  /** Compute the vectors for the kmeans */
+  /** PART 3: Compute the vectors for the kmeans
+    * We want to convert scores, of the form (Question, HighScore)
+    * into vectors, of the form (LangIndex, HighScore)
+    * So basically we have to map Questions to a language index while preserving the HighScore part of the tuple.
+    * */
   //    RDD(lang index * lang spread, high score)
   def vectorPostings(scored: RDD[(Question, HighScore)]): RDD[(LangIndex, HighScore)] = {
-    /** Return optional index of first language that occurs in `tags`. */
+    /** Return optional index of first language that occurs in `tags`.
+      * Why does the question want to use a recursive function to do this?!
+      * */
     def firstLangInTag(tag: Option[String], ls: List[String]): Option[Int] = {
       if (tag.isEmpty) None
       else if (ls.isEmpty) None
@@ -133,7 +142,10 @@ class StackOverflow extends StackOverflowInterface with Serializable {
       }
     }
 
-    scored.map(pair => (firstLangInTag(pair._1.tags, langs).get * langSpread, pair._2))
+    scored.map(pair => (
+      firstLangInTag(pair._1.tags, langs).get * langSpread,
+      pair._2
+    ))
   }
 
 
@@ -186,11 +198,38 @@ class StackOverflow extends StackOverflowInterface with Serializable {
   //
   //
 
-  /** Main kmeans computation */
+  /** PART 4: Main kmeans computation
+    * The solution should use the methods:
+    * findClosest(p: (Int, Int), centers: Array[(Int, Int)]): Int
+    * averageVectors(ps: Iterable[(Int, Int)]): (Int, Int)
+    * euclideanDistance(a1: Array[(Int, Int)], a2: Array[(Int, Int)]): Double
+    *
+    * Directions are to:
+    * 1. pair each vector with the index of the closest mean (its cluster)
+    * * this means we want an RDD of pairs containing RDD[(vector, closest mean)]
+    *
+    * 2. compute the new means by averaging the values of each cluster.
+    * This is of the form Array[(Int, Int)]
+    *
+    * */
   @tailrec final def kmeans(means: Array[(Int, Int)], vectors: RDD[(Int, Int)], iter: Int = 1, debug: Boolean = false): Array[(Int, Int)] = {
-    val newMeans = means.clone() // you need to compute newMeans
+    // gives us RDD[(Int, (Int, Int))] which is RDD[(idx of mean, vector)]
+    val pairedWithClosestMean = vectors.map(v => (findClosest(v, means), v))
 
-    // TODO: Fill in the newMeans array
+    // since averageVectors takes an Iterable, suggests we need to use groupByKey
+    // gives us RDD[(Int, Iterable(Int, Int))] which is RDD[(idx of mean, vectors closest to that mean)]
+    val groupByMeanIndex = pairedWithClosestMean.groupByKey()
+
+    //    Calculate the new averages of vectors for each mean. Each new average will become the new mean for the next iteration.
+    //    mapValues allows us to do the averaging operation on the vectors while maintaining reference to the mean's index.
+    //    Last, we convert to a map to make it easy to look up the new mean value for the old mean (if it's present)
+    //    When would it not be present?
+    //    If the mean was never closest to any of the points. It would be left out during the pairing with closest means.
+    val newMeansMap = groupByMeanIndex.mapValues(vectors => averageVectors(vectors)).collect().toMap
+
+    //    if the new mean does not exist in the map, then the old mean stays put (ie, use the original mean value)
+    val newMeans = means.indices.map(i => newMeansMap.getOrElse(i, means(i))).toArray
+
     val distance = euclideanDistance(means, newMeans)
 
     if (debug) {
@@ -237,7 +276,9 @@ class StackOverflow extends StackOverflowInterface with Serializable {
 
   /** Return the euclidean distance between two points */
   def euclideanDistance(a1: Array[(Int, Int)], a2: Array[(Int, Int)]): Double = {
-    assert(a1.length == a2.length)
+    assert(a1.length == a2.length,
+      "Failure in euclideanDistance, expected arguments to have same length but got lengths " + a1.length +
+        " and " + a2.length)
     var sum = 0d
     var idx = 0
     while (idx < a1.length) {
@@ -247,7 +288,7 @@ class StackOverflow extends StackOverflowInterface with Serializable {
     sum
   }
 
-  /** Return the closest point */
+  /** Returns the index of the closest point */
   def findClosest(p: (Int, Int), centers: Array[(Int, Int)]): Int = {
     var bestIndex = 0
     var closest = Double.PositiveInfinity
@@ -277,26 +318,46 @@ class StackOverflow extends StackOverflowInterface with Serializable {
     ((comp1 / count).toInt, (comp2 / count).toInt)
   }
 
-
-  //
-  //
-  //  Displaying results:
-  //
-  //
+  /** PART 5 Displaying results:
+    * (a) the dominant programming language in the cluster;
+    * (b) the percent of answers that belong to the dominant language;
+    * (c) the size of the cluster (the number of questions it contains);
+    * (d) the median of the highest answer scores.
+    * */
   def clusterResults(means: Array[(Int, Int)], vectors: RDD[(LangIndex, HighScore)]): Array[(String, Double, Int, Int)] = {
+    //    pair every vector to the index of it's closest mean
     val closest = vectors.map(p => (findClosest(p, means), p))
+    //    group the vectors by the index of their closest mean
+    //    ie: RDD[(indexOfMean, Iterable(vectors))]
     val closestGrouped = closest.groupByKey()
 
+    //    now we calculate statistics for each cluster
+    //    vs is of type Iterable[(LangIndex, HighScore)]
     val median = closestGrouped.mapValues { vs =>
-      // most common language in the cluster
-      val langLabel: String = ???
-      val langPercent: Double = ??? // percent of the questions in the most common language
-      val clusterSize: Int = ???
-      val medianScore: Int = ???
+
+      val langScores = vs.groupBy(vector => vector._1)
+
+      val commonestLangV = langScores.maxBy(vector => vector._2.size)
+      //      (a)  most common language in the cluster
+      //      Fetch list item using parenthesis! wth.
+      val langLabel: String = langs(commonestLangV._1 / langSpread)
+
+      val commonestLangQuestionCount = commonestLangV._2.size
+      val allLangQuestionCount = vs.size
+      //      (b) percent of the questions in the most common language
+      val langPercent: Double = commonestLangQuestionCount * 100 / allLangQuestionCount
+
+      //      (c) the size of the cluster (the number of questions it contains);
+      val clusterSize: Int = vs.size
+
+      //      (d) the median of the highest answer scores.
+      val sortedHighScores = vs.map(v => v._2).toArray.sorted
+      val medianScore: Int = sortedHighScores.drop(sortedHighScores.length/2).head
 
       (langLabel, langPercent, clusterSize, medianScore)
     }
 
+    //    [("Scala", 0.6, 424, 15),...]
     median.collect().map(_._2).sortBy(_._4)
   }
 
