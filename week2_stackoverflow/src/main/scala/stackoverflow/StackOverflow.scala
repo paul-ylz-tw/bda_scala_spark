@@ -2,12 +2,10 @@ package stackoverflow
 
 import org.apache.spark.SparkConf
 import org.apache.spark.SparkContext
-import org.apache.spark.SparkContext._
 import org.apache.spark.rdd.RDD
 import org.apache.spark.rdd.RDD.rddToPairRDDFunctions
 
 import annotation.tailrec
-import scala.reflect.ClassTag
 
 /** A raw stackoverflow posting, either a question or an answer */
 case class Posting(postingType: Int, id: Int, acceptedAnswer: Option[Int], parentId: Option[QID], score: Int, tags: Option[String]) extends Serializable
@@ -27,6 +25,7 @@ object StackOverflow extends StackOverflow {
     val grouped = groupedPostings(raw)
     val scored = scoredPostings(grouped)
     val vectors = vectorPostings(scored)
+    vectors.cache() // significant speed up from this, 16 min vs 4 min
     assert(vectors.count() == 2121822, "Incorrect number of vectors: " + vectors.count())
 
     val means = kmeans(sampleVectors(vectors), vectors, debug = true)
@@ -142,9 +141,9 @@ class StackOverflow extends StackOverflowInterface with Serializable {
       }
     }
 
-    scored.map(pair => (
-      firstLangInTag(pair._1.tags, langs).get * langSpread,
-      pair._2
+    scored.map(question_HiScore => (
+      firstLangInTag(question_HiScore._1.tags, langs).get * langSpread,
+      question_HiScore._2
     ))
   }
 
@@ -335,24 +334,33 @@ class StackOverflow extends StackOverflowInterface with Serializable {
     //    vs is of type Iterable[(LangIndex, HighScore)]
     val median = closestGrouped.mapValues { vs =>
 
+      //      Map[(LangIndex, Iterable[(LangIndex, HighScore)])]
       val langScores = vs.groupBy(vector => vector._1)
 
-      val commonestLangV = langScores.maxBy(vector => vector._2.size)
+      //      (LangIndex, Iterable[LangIndex, HighScore])
+      val dominantLangV = langScores.maxBy(vector => vector._2.size)
+
       //      (a)  most common language in the cluster
       //      Fetch list item using parenthesis! wth.
-      val langLabel: String = langs(commonestLangV._1 / langSpread)
+      val langLabel: String = langs(dominantLangV._1 / langSpread)
 
-      val commonestLangQuestionCount = commonestLangV._2.size
-      val allLangQuestionCount = vs.size
+      val dominantLangAnswerCount = dominantLangV._2.size
+      val allLangAnswerCount = vs.size
       //      (b) percent of the questions in the most common language
-      val langPercent: Double = commonestLangQuestionCount * 100 / allLangQuestionCount
+      val langPercent: Double = dominantLangAnswerCount * 100 / allLangAnswerCount
 
       //      (c) the size of the cluster (the number of questions it contains);
-      val clusterSize: Int = vs.size
+      val clusterSize: Int = allLangAnswerCount
 
       //      (d) the median of the highest answer scores.
       val sortedHighScores = vs.map(v => v._2).toArray.sorted
-      val medianScore: Int = sortedHighScores.drop(sortedHighScores.length/2).head
+
+      //      If a list of sorted numbers is even, then the median is the average of the middle 2 numbers.
+      val medianScore: Int = if (sortedHighScores.length % 2 != 0) {
+        sortedHighScores(sortedHighScores.size / 2)
+      } else {
+        (sortedHighScores(sortedHighScores.size / 2) + sortedHighScores(sortedHighScores.size / 2 - 1)) / 2
+      }
 
       (langLabel, langPercent, clusterSize, medianScore)
     }
