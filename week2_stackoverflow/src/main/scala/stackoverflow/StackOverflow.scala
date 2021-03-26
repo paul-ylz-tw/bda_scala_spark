@@ -105,7 +105,7 @@ class StackOverflow extends StackOverflowInterface with Serializable {
       highScore
     }
 
-    /** We want the form of (1, 6,   None, None, 140, Some(CSS)),  67) per element of our RDD.
+    /** We want the form of ((1, 6,   None, None, 140, Some(CSS)),  67) per element of our RDD.
       * The first tuple item is the question, the second is the high score.
       * Question is obtained from the first element of the iterable's first tuple.
       * High score is obtained from scanning all the answers within the iterable.
